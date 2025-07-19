@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Geometry Pro - Final Fixed Version</title>
+<style>
+    body { margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: #f0f0f0; }
+    #info-container { position: absolute; top: 0; left: 0; width: 100%; box-sizing: border-box; padding: 10px; background: rgba(0,0,0,0.7); color: white; display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
+    .dialog { position: absolute; background: white; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); z-index: 100; display: none; border: 1px solid #ddd; padding: 20px; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+    .dialog h3 { margin-top: 0; }
+    .dialog input { padding: 8px; width: 80px; margin-right: 5px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; }
+    .dialog button { padding: 8px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; }
+    .dialog button:first-of-type { background-color: #007aff; color: white; border-color: #007aff; }
+</style>
+</head>
+<body>
+
+<div id="info-container">
+    <div id="info">Undo: Cmd/Ctrl+Z | Redo: Cmd/Ctrl+Y | Delete: Phím Delete | DblClick: Sửa tọa độ</div>
+</div>
+
+<div id="editDialog" class="dialog">
+    <h3>Sửa Tọa độ</h3>
+    <label>X: <input type="number" id="editX" step="0.1"></label>
+    <label>Y: <input type="number" id="editY" step="0.1"></label>
+    <label>Z: <input type="number" id="editZ" step="0.1"></label>
+    <div style="text-align: right; margin-top: 10px;">
+        <button id="confirmEdit">Lưu</button>
+        <button id="cancelEdit">Hủy</button>
+    </div>
+</div>
+
+<script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/" } }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const COLOR_DEFAULT = 0xcc0000;
+    
+    //--- CÁC LỚP QUẢN LÝ (CLASSES) ---
+    class UIManager {
+        constructor() { this.editDialog=document.getElementById('editDialog');this.onConfirmEdit=null;this.isDialogOpen=false;this.setupEventListeners(); }
+        setupEventListeners() { document.getElementById('confirmEdit').onclick=()=>{const p={x:parseFloat(document.getElementById('editX').value),y:parseFloat(document.getElementById('editY').value),z:parseFloat(document.getElementById('editZ').value)};if(!isNaN(p.x)&&!isNaN(p.y)&&!isNaN(p.z)){this.onConfirmEdit&&this.onConfirmEdit(p);}this.hideAll();};document.getElementById('cancelEdit').onclick=()=>this.hideAll(); }
+        showEditDialog(pointData) { document.getElementById('editX').value=pointData.position.x.toFixed(2);document.getElementById('editY').value=pointData.position.y.toFixed(2);document.getElementById('editZ').value=pointData.position.z.toFixed(2);this.editDialog.style.display='block';this.isDialogOpen=true; }
+        hideAll() { this.editDialog.style.display='none';this.isDialogOpen=false; }
+    }
+    class SceneManager {
+        constructor(scene) { this.scene=scene;this.points=new Map();this.lines=new Map(); }
+        createLabelSprite(text, color = "rgba(0, 102, 204, 1.0)") { const fontface="Arial";const fontsize=24;const canvas=document.createElement('canvas');const context=canvas.getContext('2d');context.font=`Bold ${fontsize}px ${fontface}`;const metrics=context.measureText(text);canvas.width=metrics.width;canvas.height=fontsize*1.2;context.font=`Bold ${fontsize}px ${fontface}`;context.fillStyle=color;context.fillText(text,0,fontsize);const texture=new THREE.Texture(canvas);texture.needsUpdate=true;const spriteMaterial=new THREE.SpriteMaterial({map:texture,depthTest:false});const sprite=new THREE.Sprite(spriteMaterial);const scaleFactor=0.0025;sprite.scale.set(scaleFactor*canvas.width,scaleFactor*canvas.height,1.0);return sprite; }
+        addPoint(id,position,color=COLOR_DEFAULT,labelOffset=new THREE.Vector3(0.05,0.05,0),customLabel=null) { const pointSize=0.025;const label=customLabel||String.fromCharCode(65+this.points.size);const g=new THREE.SphereGeometry(pointSize,16,8);const m=new THREE.MeshLambertMaterial({color});const mesh=new THREE.Mesh(g,m);const pData={id,label,position,labelOffset,color,mesh,labelSprite:null,updateLabelText:function(){if(this.labelSprite){this.mesh.remove(this.labelSprite);}const text=`${this.label}(${this.position.x.toFixed(2)}, ${this.position.y.toFixed(2)}, ${this.position.z.toFixed(2)})`;this.labelSprite=this.manager.createLabelSprite(text);this.mesh.add(this.labelSprite);this.updatePositions();},updatePositions:function(){this.mesh.position.copy(this.position);if(this.labelSprite){this.labelSprite.position.copy(this.labelOffset);}},setColor:function(c){this.color=c;this.mesh.material.color.setHex(c);},manager:this};pData.updateLabelText();this.scene.add(mesh);this.points.set(id,pData);return pData; }
+        removePoint(id){if(!this.points.has(id))return null;const p=this.points.get(id);const lines=this.getConnectedLines(p);lines.forEach(l=>this.removeLine(l.id));this.scene.remove(p.mesh);this.points.delete(id);return{deletedPoint:p,deletedLines:lines};}
+        addLine(id,start,end){const m=new THREE.LineBasicMaterial({color:0x0066ff,linewidth:1});const g=new THREE.BufferGeometry().setFromPoints([start.position,end.position]);const line=new THREE.Line(g,m);this.scene.add(line);const lineData={id,startPoint:start,endPoint:end,lineMesh:line};this.lines.set(id,lineData);return lineData;}
+        removeLine(id){if(this.lines.has(id)){this.scene.remove(this.lines.get(id).lineMesh);this.lines.delete(id);}}
+        updateConnectedLines(p){this.getConnectedLines(p).forEach(s=>{s.lineMesh.geometry.setFromPoints([s.startPoint.position,s.endPoint.position]);});}
+        getConnectedLines(p){const c=[];for(const l of this.lines.values()){if(l.startPoint.id===p.id||l.endPoint.id===p.id){c.push(l);}}return c;}
+        getPointByMesh(m){for(const p of this.points.values()){if(p.mesh===m)return p;}return null;}
+        getPointByLabel(label){for(const p of this.points.values()){if(p.label===label)return p;}return null;}
+        getAllPointMeshes(){return Array.from(this.points.values()).map(p=>p.mesh);}
+    }
+    class Command{execute(){}undo(){}}
+    class CreatePointCommand extends Command{constructor(sm,pos,label=null){super();this.sm=sm;this.pos=pos;this.label=label;this.id=THREE.MathUtils.generateUUID();}execute(){this.pointData=this.sm.addPoint(this.id,this.pos,COLOR_DEFAULT,undefined,this.label);}undo(){this.sm.removePoint(this.id);}}
+    class DeletePointCommand extends Command{constructor(sm,point){super();this.sm=sm;this.point=point;}execute(){const{deletedLines}=this.sm.removePoint(this.point.id);this.deletedLines=deletedLines;}undo(){const p=this.sm.addPoint(this.point.id,this.point.position,this.point.color,this.point.labelOffset,this.point.label);this.deletedLines.forEach(l=>{const start=l.startPoint.id===p.id?p:this.sm.points.get(l.startPoint.id);const end=l.endPoint.id===p.id?p:this.sm.points.get(l.endPoint.id);this.sm.addLine(l.id,start,end);});}}
+    class MovePointCommand extends Command{constructor(p,oldPos,newPos,sm){super();this.point=p;this.oldPos=oldPos.clone();this.newPos=newPos.clone();this.sm=sm;}execute(){this.point.position.copy(this.newPos);this.point.updatePositions();this.point.updateLabelText();this.sm.updateConnectedLines(this.point);}undo(){this.point.position.copy(this.oldPos);this.point.updatePositions();this.point.updateLabelText();this.sm.updateConnectedLines(this.point);}}
+    class ConnectPointsCommand extends Command{constructor(sm,start,end){super();this.sm=sm;this.start=start;this.end=end;this.id=THREE.MathUtils.generateUUID();}execute(){this.lineData=this.sm.addLine(this.id,this.start,this.end);}undo(){this.sm.removeLine(this.id);}}
+    class CommandManager{constructor(){this.undoStack=[];this.redoStack=[];}execute(cmd){cmd.execute();this.undoStack.push(cmd);this.redoStack=[];}undo(){const cmd=this.undoStack.pop();if(cmd){cmd.undo();this.redoStack.push(cmd);}}redo(){const cmd=this.redoStack.pop();if(cmd){cmd.execute();this.undoStack.push(cmd);}}}
+
+    class InteractionManager{
+        constructor(app){this.app=app;this.camera=app.camera;this.domElement=app.renderer.domElement;this.sm=app.sceneManager;this.cm=app.commandManager;this.ui=app.uiManager;this.raycaster=new THREE.Raycaster();this.mouse=new THREE.Vector2();this.plane=new THREE.Plane();this.selectedPoint=null;this.startConnectPoint=null;this.dragStartPos=null;this.isDragging=false;this.lastClickTime=0;this.addEventListeners();}
+        addEventListeners(){this.domElement.addEventListener('mousedown',e=>this.onMouseDown(e));this.domElement.addEventListener('mousemove',e=>this.onMouseMove(e));this.domElement.addEventListener('mouseup',e=>this.onMouseUp(e));this.domElement.addEventListener('dblclick',e=>this.onDoubleClick(e));window.addEventListener('keydown',e=>this.onKeyDown(e));this.ui.onConfirmEdit=p=>{if(this.selectedPoint)this.cm.execute(new MovePointCommand(this.selectedPoint,this.selectedPoint.position,new THREE.Vector3(p.x,p.y,p.z),this.sm));};}
+        updateMouse(e){this.mouse.set((e.clientX/window.innerWidth)*2-1,-(e.clientY/window.innerHeight)*2+1);this.raycaster.setFromCamera(this.mouse,this.camera);}
+        getPointUnderMouse(){this.raycaster.params.Points.threshold=0.1;const i=this.raycaster.intersectObjects(this.sm.getAllPointMeshes());return i.length>0?this.sm.getPointByMesh(i[0].object):null;}
+        deselectAll(){if(this.selectedPoint){this.selectedPoint.setColor(this.selectedPoint.color);this.selectedPoint=null;}if(this.startConnectPoint){this.startConnectPoint.setColor(this.startConnectPoint.color);this.startConnectPoint=null;}}
+        onKeyDown(e){const isMac=navigator.platform.includes('Mac');const undo=(isMac?e.metaKey:e.ctrlKey)&&!e.shiftKey&&e.key==='z';const redo=(isMac?e.metaKey:e.ctrlKey)&&(e.key==='y'||(e.shiftKey&&e.key==='z'));if(undo){e.preventDefault();this.cm.undo();}if(redo){e.preventDefault();this.cm.redo();}if(e.key==='Delete'||e.key==='Backspace'){if(this.selectedPoint){e.preventDefault();this.cm.execute(new DeletePointCommand(this.sm,this.selectedPoint));this.deselectAll();}}}
+        onMouseDown(e){if(this.ui.isDialogOpen)return;const now=(new Date()).getTime();if(now-this.lastClickTime<300)return;this.lastClickTime=now;this.ui.hideAll();this.updateMouse(e);const clickedPoint=this.getPointUnderMouse();if(e.button!==0)return;if(e.altKey){if(clickedPoint){this.cm.execute(new DeletePointCommand(this.sm,clickedPoint));this.deselectAll();}return;}if(e.shiftKey){if(clickedPoint){if(!this.startConnectPoint){this.startConnectPoint=clickedPoint;this.startConnectPoint.setColor(0xffff00);}else if(this.startConnectPoint!==clickedPoint){this.cm.execute(new ConnectPointsCommand(this.sm,this.startConnectPoint,clickedPoint));this.deselectAll();}}else{this.deselectAll();}return;}if(e.ctrlKey||e.metaKey){if(clickedPoint){if(this.selectedPoint&&this.selectedPoint.id===clickedPoint.id){this.isDragging=true;this.dragStartPos=clickedPoint.position.clone();this.app.controls.enabled=false;}else{this.deselectAll();this.selectedPoint=clickedPoint;this.selectedPoint.setColor(0x00ff00);}}else{this.deselectAll();}return;}this.deselectAll();}
+        onMouseMove(e){this.updateMouse(e);if(this.isDragging&&this.selectedPoint){this.plane.setFromNormalAndCoplanarPoint(this.camera.getWorldDirection(this.plane.normal),this.selectedPoint.position);const p=new THREE.Vector3();if(this.raycaster.ray.intersectPlane(this.plane,p)){this.selectedPoint.position.copy(p);this.selectedPoint.updatePositions();this.selectedPoint.updateLabelText();this.sm.updateConnectedLines(this.selectedPoint);}}else{this.domElement.style.cursor=this.getPointUnderMouse()?'pointer':'auto';}}
+        onMouseUp(e){if(this.isDragging&&this.selectedPoint){if(this.dragStartPos.distanceTo(this.selectedPoint.position)>0.001)this.cm.execute(new MovePointCommand(this.selectedPoint,this.dragStartPos,this.selectedPoint.position,this.sm));}else if(!e.altKey&&!e.shiftKey&&!e.ctrlKey&&!e.metaKey){if(!this.getPointUnderMouse()){const i=this.raycaster.intersectObjects([this.app.gridHelperMajor]);if(i.length>0){const intersectPoint=i[0].point;const newPosition=new THREE.Vector3(intersectPoint.x,intersectPoint.y,0);this.cm.execute(new CreatePointCommand(this.sm,newPosition));}}}this.isDragging=false;this.app.controls.enabled=true;}
+        onDoubleClick(e) {this.updateMouse(e);const clickedPoint=this.getPointUnderMouse();if(clickedPoint){this.deselectAll();this.selectedPoint=clickedPoint;this.selectedPoint.setColor(0x00ff00);this.ui.showEditDialog(clickedPoint);}}
+    }
+    class App{
+        constructor(){
+            // <-- SỬA LỖI: Thay đổi thứ tự khởi tạo -->
+            this.initScene();
+            this.uiManager = new UIManager();
+            this.sceneManager = new SceneManager(this.scene);
+            this.commandManager = new CommandManager();
+            this.interactionManager = new InteractionManager(this);
+            
+            // Gọi các hàm tạo nội dung SAU KHI các manager đã sẵn sàng
+            this.createAxisLabels();
+            this.createInitialScene();
+            
+            this.animate();
+        }
+        initScene(){
+            this.scene=new THREE.Scene();
+            this.scene.background=new THREE.Color(0xf0f0f0);
+            this.camera=new THREE.PerspectiveCamera(60,window.innerWidth/window.innerHeight,0.1,1000);
+            this.camera.position.set(2.5,3,4);
+            this.renderer=new THREE.WebGLRenderer({antialias:true});
+            this.renderer.setSize(window.innerWidth,window.innerHeight);
+            document.body.appendChild(this.renderer.domElement);
+            this.controls=new OrbitControls(this.camera,this.renderer.domElement);
+            this.controls.enableDamping=true;
+            this.controls.target.set(0.5,0.5,0.5);
+            this.scene.add(new THREE.AmbientLight(0xffffff,0.8),new THREE.DirectionalLight(0xffffff,0.7));
+            const size=10;
+            this.gridHelperMajor=new THREE.GridHelper(size,size);
+            this.gridHelperMajor.rotation.x = Math.PI/2;
+            this.scene.add(this.gridHelperMajor);
+            this.gridHelperMinor=new THREE.GridHelper(size,size*10);
+            this.gridHelperMinor.material.color.set(0xcccccc);
+            this.gridHelperMinor.material.transparent=true;
+            this.gridHelperMinor.material.opacity=0.5;
+            this.gridHelperMinor.rotation.x = Math.PI/2;
+            this.scene.add(this.gridHelperMinor);
+            
+            const axesHelper=new THREE.AxesHelper(size / 2);
+            this.scene.add(axesHelper);
+            
+            window.addEventListener('resize',()=>{this.camera.aspect=window.innerWidth/window.innerHeight;this.camera.updateProjectionMatrix();this.renderer.setSize(window.innerWidth,window.innerHeight);});
+        }
+        createAxisLabels() {
+            const axisColors = { x: "rgba(200, 0, 0, 1.0)", y: "rgba(0, 150, 0, 1.0)", z: "rgba(0, 0, 200, 1.0)" };
+            for (let i = 1; i <= 5; i++) {
+                const xLabel = this.sceneManager.createLabelSprite(i.toString(), axisColors.x);
+                xLabel.position.set(i, 0.05, 0);
+                this.scene.add(xLabel);
+                const yLabel = this.sceneManager.createLabelSprite(i.toString(), axisColors.y);
+                yLabel.position.set(0, i + 0.05, 0);
+                this.scene.add(yLabel);
+                const zLabel = this.sceneManager.createLabelSprite(i.toString(), axisColors.z);
+                zLabel.position.set(0, 0.05, i);
+                this.scene.add(zLabel);
+            }
+        }
+        createInitialScene(){const pDef=[{label:'O',pos:new THREE.Vector3(0,0,0)},{label:'A',pos:new THREE.Vector3(1,0,0)},{label:'B',pos:new THREE.Vector3(0,1,0)},{label:'C',pos:new THREE.Vector3(1,1,0)},{label:'D',pos:new THREE.Vector3(0,0,1)},{label:'E',pos:new THREE.Vector3(1,0,1)},{label:'F',pos:new THREE.Vector3(0,1,1)},{label:'G',pos:new THREE.Vector3(1,1,1)}];pDef.forEach(def=>{this.commandManager.execute(new CreatePointCommand(this.sceneManager,def.pos,def.label));});const edges=[['O','A'],['O','B'],['O','D'],['A','C'],['A','E'],['B','C'],['B','F'],['C','G'],['D','E'],['D','F'],['E','G'],['F','G']];edges.forEach(edge=>{const s=this.sceneManager.getPointByLabel(edge[0]);const e=this.sceneManager.getPointByLabel(edge[1]);if(s&&e){this.commandManager.execute(new ConnectPointsCommand(this.sceneManager,s,e));}});this.commandManager.undoStack=[];this.commandManager.redoStack=[];}
+        animate(){requestAnimationFrame(()=>this.animate());this.controls.update();this.renderer.render(this.scene,this.camera);}}
+    
+    new App();
+</script>
+</body>
+</html>
