@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ctrl+Drag để di chuyển điểm</title>
+<style>
+    body {
+        margin: 0; padding: 20px; font-family: sans-serif;
+        display: flex; flex-direction: column; align-items: center; background-color: #f4f4f4;
+    }
+    canvas {
+        border: 1px solid #999; cursor: crosshair; background-color: #fff;
+    }
+    #controls {
+        margin-top: 10px; display: flex; align-items: center; gap: 20px;
+    }
+    #info {
+        padding: 10px; border: 1px solid #ccc; background-color: #f9f9f9;
+        min-width: 450px; height: 40px; display: flex; align-items: center;
+    }
+    button {
+        padding: 8px 15px; border: 1px solid #dc3545; background-color: #dc3545;
+        color: white; border-radius: 5px; cursor: pointer;
+    }
+    button:hover { background-color: #c82333; }
+</style>
+</head>
+<body>
+
+<h1>Click để tạo điểm, Ctrl+Drag để di chuyển, Shift+Click để nối</h1>
+<canvas id="myCanvas" width="800" height="600"></canvas>
+<div id="controls">
+    <div id="info">Hướng dẫn: Click = Tạo điểm, Ctrl+Drag = Di chuyển, Shift+Click = Nối.</div>
+    <button id="clearButton">Xóa tất cả</button>
+</div>
+
+<script>
+const canvas = document.getElementById('myCanvas');
+const ctx = canvas.getContext('2d');
+const infoBox = document.getElementById('info');
+const clearButton = document.getElementById('clearButton');
+
+// Cài đặt hệ tọa độ
+const pixelsPerGrid = 20;
+const unitValue = 0.1;
+const pixelsPerUnit = pixelsPerGrid / unitValue;
+const originX = canvas.width / 2;
+const originY = canvas.height / 2;
+
+let points = [];
+let lineSegments = [];
+
+// Biến trạng thái
+let isDragging = false;
+let selectedPointIndex = null;
+const hitThreshold = 0.2;
+let startPointForConnectionIndex = null;
+
+// === CÁC HÀM CHUYỂN ĐỔI (Không đổi) ===
+function pixelToVirtual(px, py) { return { x: (px - originX) / pixelsPerUnit, y: (originY - py) / pixelsPerUnit }; }
+function virtualToPixel(vx, vy) { return { x: (vx * pixelsPerUnit) + originX, y: originY - (vy * pixelsPerUnit) }; }
+
+// === CÁC HÀM VẼ (Không đổi, chỉ thêm redrawCanvas) ===
+function drawGridAndAxes() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = 1; ctx.strokeStyle = '#e0e0e0'; ctx.beginPath();
+    for (let x = originX % pixelsPerGrid; x < canvas.width; x += pixelsPerGrid) { ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); }
+    for (let y = originY % pixelsPerGrid; y < canvas.height; y += pixelsPerGrid) { ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); }
+    ctx.stroke();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#888'; ctx.beginPath();
+    ctx.moveTo(0, originY); ctx.lineTo(canvas.width, originY);
+    ctx.moveTo(originX, 0); ctx.lineTo(originX, canvas.height);
+    ctx.stroke();
+}
+function drawAllSegments() {
+    ctx.strokeStyle = '#28a745'; ctx.lineWidth = 2;
+    for (const segment of lineSegments) {
+        const startPoint = points[segment.start]; const endPoint = points[segment.end];
+        if (!startPoint || !endPoint) continue;
+        const startPixel = virtualToPixel(startPoint.x, startPoint.y);
+        const endPixel = virtualToPixel(endPoint.x, endPoint.y);
+        ctx.beginPath(); ctx.moveTo(startPixel.x, startPixel.y); ctx.lineTo(endPixel.x, endPixel.y); ctx.stroke();
+    }
+}
+function drawPoint(point, pixelPos) {
+    if (point.isSelectedForConnection) {
+        ctx.beginPath(); ctx.fillStyle = 'rgba(255, 255, 0, 0.7)';
+        ctx.arc(pixelPos.x, pixelPos.y, 10, 0, 2 * Math.PI); ctx.fill();
+    }
+    ctx.beginPath(); ctx.fillStyle = 'red';
+    ctx.arc(pixelPos.x, pixelPos.y, 5, 0, 2 * Math.PI); ctx.fill();
+}
+function displayLabel(point, pixelPos) {
+    ctx.fillStyle = 'blue'; ctx.font = '14px Arial';
+    const labelText = `${point.label}(${point.x.toFixed(2)}, ${point.y.toFixed(2)})`;
+    ctx.fillText(labelText, pixelPos.x + 10, pixelPos.y - 10);
+}
+function redrawCanvas() {
+    drawGridAndAxes();
+    drawAllSegments();
+    for (const point of points) {
+        const pixelPos = virtualToPixel(point.x, point.y);
+        drawPoint(point, pixelPos);
+        displayLabel(point, pixelPos);
+    }
+}
+
+// === CÁC TRÌNH LẮNG NGHE SỰ KIỆN ===
+function getMousePixelPos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+}
+function getPointUnderMouse(mouseVirtual) {
+    for (let i = points.length - 1; i >= 0; i--) {
+        const p = points[i];
+        const distance = Math.sqrt(Math.pow(p.x - mouseVirtual.x, 2) + Math.pow(p.y - mouseVirtual.y, 2));
+        if (distance < hitThreshold) return i;
+    }
+    return null;
+}
+function resetConnectionState() {
+    if (startPointForConnectionIndex !== null) {
+        points[startPointForConnectionIndex].isSelectedForConnection = false;
+        startPointForConnectionIndex = null;
+        redrawCanvas();
+    }
+}
+
+// THAY ĐỔI LỚN: Logic `mousedown` được phân tách rõ ràng
+canvas.addEventListener('mousedown', function(evt) {
+    const mousePixel = getMousePixelPos(evt);
+    const mouseVirtual = pixelToVirtual(mousePixel.x, mousePixel.y);
+    const clickedPointIndex = getPointUnderMouse(mouseVirtual);
+
+    // --- Xử lý nối điểm với SHIFT ---
+    if (evt.shiftKey) {
+        evt.preventDefault(); // Ngăn các hành vi mặc định của trình duyệt khi nhấn Shift
+        if (clickedPointIndex !== null) {
+            if (startPointForConnectionIndex === null) {
+                startPointForConnectionIndex = clickedPointIndex;
+                points[startPointForConnectionIndex].isSelectedForConnection = true;
+                infoBox.innerHTML = `Đã chọn điểm <b>${points[startPointForConnectionIndex].label}</b>. Shift+Click điểm khác để nối.`;
+            } else {
+                if (startPointForConnectionIndex !== clickedPointIndex) {
+                    lineSegments.push({ start: startPointForConnectionIndex, end: clickedPointIndex });
+                    infoBox.innerHTML = `Đã nối <b>${points[startPointForConnectionIndex].label}</b> và <b>${points[clickedPointIndex].label}</b>.`;
+                }
+                resetConnectionState();
+            }
+        } else {
+            resetConnectionState();
+            infoBox.textContent = 'Đã hủy chọn. Shift+Click vào 1 điểm để bắt đầu lại.';
+        }
+        redrawCanvas();
+        return; // Dừng xử lý
+    }
+
+    // --- Xử lý kéo-thả với CTRL ---
+    if (evt.ctrlKey || evt.metaKey) { // metaKey là phím Command trên Mac
+        evt.preventDefault();
+        resetConnectionState(); // Hủy chọn nối điểm nếu có
+        if (clickedPointIndex !== null) {
+            isDragging = true;
+            selectedPointIndex = clickedPointIndex;
+        }
+        return; // Dừng xử lý
+    }
+
+    // --- Hành động mặc định (Click chuột bình thường) ---
+    // Không làm gì ở mousedown, chờ mouseup để tạo điểm.
+    // Nhưng vẫn phải hủy trạng thái nối điểm nếu có.
+    resetConnectionState();
+});
+
+canvas.addEventListener('mousemove', function(evt) {
+    const mousePixel = getMousePixelPos(evt);
+    const mouseVirtual = pixelToVirtual(mousePixel.x, mousePixel.y);
+    if (isDragging && selectedPointIndex !== null) {
+        points[selectedPointIndex].x = mouseVirtual.x;
+        points[selectedPointIndex].y = mouseVirtual.y;
+        redrawCanvas();
+        const p = points[selectedPointIndex];
+        infoBox.innerHTML = `Đang di chuyển <b>${p.label}</b>: (X: ${p.x.toFixed(3)}, Y: ${p.y.toFixed(3)})`;
+    } else {
+        canvas.style.cursor = getPointUnderMouse(mouseVirtual) !== null ? 'pointer' : 'crosshair';
+    }
+});
+
+// THAY ĐỔI NHỎ: Logic `mouseup` giờ đây rõ ràng hơn
+canvas.addEventListener('mouseup', function(evt) {
+    // Chỉ tạo điểm nếu đây là click chuột đơn giản
+    // (Không kéo, không giữ Shift, không giữ Ctrl, và click vào vùng trống)
+    if (!isDragging && !evt.shiftKey && !evt.ctrlKey && !evt.metaKey) {
+        const mousePixel = getMousePixelPos(evt);
+        const virtualCoords = pixelToVirtual(mousePixel.x, mousePixel.y);
+        if (getPointUnderMouse(virtualCoords) === null) {
+            const newLabel = String.fromCharCode(65 + points.length);
+            points.push({ x: virtualCoords.x, y: virtualCoords.y, label: newLabel, isSelectedForConnection: false });
+            redrawCanvas();
+            infoBox.innerHTML = `Đã tạo điểm <b>${points[points.length-1].label}</b>.`;
+        }
+    }
+
+    // Luôn reset trạng thái kéo khi thả chuột
+    isDragging = false;
+    selectedPointIndex = null;
+});
+
+clearButton.addEventListener('click', function() {
+    points = [];
+    lineSegments = [];
+    isDragging = false;
+    selectedPointIndex = null;
+    startPointForConnectionIndex = null;
+    redrawCanvas();
+    infoBox.textContent = 'Hướng dẫn: Click = Tạo điểm, Ctrl+Drag = Di chuyển, Shift+Click = Nối.';
+});
+
+// Vẽ lần đầu
+redrawCanvas();
+</script>
+
+</body>
+</html>
